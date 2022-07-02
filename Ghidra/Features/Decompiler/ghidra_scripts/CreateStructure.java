@@ -40,13 +40,16 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.Map.Entry;
 
 import docking.ActionContext;
 import docking.action.KeyBindingData;
 import docking.action.MenuData;
+import docking.widgets.textfield.IntegerTextField;
 import ghidra.app.cmd.label.RenameLabelCmd;
 import ghidra.app.context.ListingActionContext;
 import ghidra.app.decompiler.*;
@@ -74,6 +77,7 @@ import ghidra.program.model.pcode.HighVariable;
 import ghidra.program.model.pcode.PcodeException;
 import ghidra.program.model.pcode.PcodeOp;
 import ghidra.program.model.pcode.Varnode;
+import ghidra.program.model.pcode.VarnodeAST;
 import ghidra.program.model.symbol.Namespace;
 import ghidra.program.model.symbol.SourceType;
 import ghidra.program.model.symbol.Symbol;
@@ -91,6 +95,7 @@ import ghidra.util.task.TaskMonitor;
 public class CreateStructure extends GhidraScript {
 	
 	DecompInterface decomp;
+	private PluginTool tool;
 
 	@Override
 	public void run() throws Exception {
@@ -99,70 +104,154 @@ public class CreateStructure extends GhidraScript {
 				new FillOutStructureCmd(currentProgram, currentLocation, state.getTool());
 		fillCmd.applyTo(currentProgram, this.monitor);*/
 		FunctionIterator funcs = currentProgram.getFunctionManager().getFunctions(true);
-		decomp = setUpDecompiler();
-		for (Function fn : funcs) {
-			Variable[] allvars = fn.getAllVariables();
-			for(Variable var : allvars) {
-				/*DecompileResults res = decomp.decompileFunction(fn, 10000, monitor);
-				ClangNode nodres = null;
-				ClangTokenGroup ccode = res.getCCodeMarkup();
-				println("Decompiled " + fn.getName());
-				ClangToken tokeres = new ClangToken((ClangNode) var.getVariableStorage().getFirstVarnode());
-				*/
-				DataType dattyp = var.getDataType();
-				String datatypstring = dattyp.getDisplayName();
-				if(!datatypstring.contains("*")) continue;
-				datatypstring = datatypstring.replaceAll("\\[|\\]|\\*|\\s", "");
-		        //println(datatypstring = datatypstring.replaceAll("\\[|\\]|\\*|\\s", ""));
-		        DecompileResults res = decomp.decompileFunction(fn, 10000, monitor);
-		        
-		        //println("type : " + dattyp.getCategoryPath().getName());
-		        
-		        if(!dattyp.getCategoryPath().getName().equals("Demangler")) {
-		        	continue;
-		        }
-		        
-		        ClangTokenGroup tokengrp = res.getCCodeMarkup();
-		        
-		        if(tokengrp == null) continue;
-		        
-		        ClangToken tokeres = null;
-		        
-		        //println("searching for " + datatypstring);
-		        
-		        mainloop:
-		        for(ClangNode  token : tokengrp) {
-		        	if(token instanceof ClangFuncProto) {
-		        		for(ClangNode  outter : ((ClangFuncProto)token)) {
-		        			if(outter instanceof ClangVariableDecl)
-		        			for(ClangNode inner2 : ((ClangVariableDecl)outter)) {
-			        			if(inner2 instanceof ClangToken) {
-			        				if(((ClangToken)inner2).getText().equals(datatypstring)) {
-						        		tokeres = (ClangToken)inner2;
-						        		//println(inner2.getClass().toString());
-						        		break mainloop;
-						        	}
-				        			else {
-				        				//println("" + ((ClangToken)inner2).getText());
-				        			}
-			        			}
+		tool = state.getTool();
+		decomp = setUpDecompiler(currentProgram);
+		for (Function fn : funcs)
+		//Function fn = getFunctionAt(currentAddress);
+		{
+			println(fn.getName());
+			Variable[] allvars = fn.getLocalVariables();
+			boolean inited = false;
+			DecompileResults res = decomp.decompileFunction(fn, 10000, monitor);
+			
+			HighFunction hifun = res.getHighFunction();
+			
+			if(hifun == null) continue;
+			
+			Iterator<HighSymbol> syms = hifun.getLocalSymbolMap().getSymbols();
+			
+			//StructureDataType dt = new StructureDataType(new CategoryPath(DEFAULT_CATEGORY), fn.getName() + "_" + currentAddress + "_stack_struct",
+					//		size, f.getProgram().getDataTypeManager());
+			
+			long minoffset = Integer.MAX_VALUE;
+			long maxoffset = Integer.MIN_VALUE;
+			HighVariable deepesthivar = null;
+			
+			//determine min offset to calculate structure size
+			//and variable to populate
+			Map<Integer,HighSymbol> symssorted = new TreeMap<>();
+			
+			while(syms.hasNext()) {
+				HighSymbol next = syms.next();
+				HighVariable hivar = next.getHighVariable();
+				if(hivar == null) continue;
+				Varnode node = hivar.getRepresentative();
+				if(node.isAddrTied()) {
+					println(""+node.getAddress().getOffset());
+					if(minoffset > node.getAddress().getOffset()) {
+						minoffset = node.getAddress().getOffset();
+						deepesthivar = hivar;
+					}
+					if(maxoffset < node.getAddress().getOffset()) {
+						maxoffset = node.getAddress().getOffset();
+					}
+					symssorted.put((int)node.getAddress().getOffset(), next);	
+				}
+			}
+			
+			if(deepesthivar == null) continue;
+			
+			try {
+			
+			Structure struc = createNewStruct(deepesthivar, 0, fn, false);
+			
+			//syms = hifun.getLocalSymbolMap().getSymbols();
+			
+			Iterator<Entry<Integer,HighSymbol>> mapiter = symssorted.entrySet().iterator() ;
+			
+			//populate fields
+			
+			while(mapiter.hasNext()) {
+				Entry<Integer,HighSymbol> en = mapiter.next();
+				HighSymbol next = en.getValue();
+				HighVariable hivar = next.getHighVariable();
+				if(hivar == null) continue;
+				Varnode node = hivar.getRepresentative();
+				if(node.isAddrTied()) {
+					long offset = Math.abs(node.getAddress().getOffset() - minoffset);
+					println("at " + offset);
+					struc.insertAtOffset((int)offset, hivar.getDataType(), 0, hivar.getName(), "");
+				}
+			}
+			
+			
+			
+			HighFunctionDBUtil.updateDBVariable(deepesthivar.getSymbol(), null, struc,
+					SourceType.USER_DEFINED);
+			}
+			catch(Exception exc) {
+				println(exc.toString());
+			}
+			
+			//StructureDataType dt = new StructureDataType(new CategoryPath(DEFAULT_CATEGORY), fn.getName() + "_" + currentAddress + "_stack_struct",
+			//		size, f.getProgram().getDataTypeManager());
+			
+			//for(Variable var : allvars) {
+				//println(frame.getLocals()[0].getMinAddress().toString());
+				//Address curr = getAddressFactory().getAddress("Stack[0x0]");//frame.getLocals()[0].getMinAddress();
+				//curr.add(frame.getFrameSize());
+				//println(curr.toString());
+				/*Iterator<VarnodeAST> iter = hifun.locRange();
+				
+				while(iter.hasNext()) {
+					VarnodeAST next = iter.next();
+					if(next.isAddrTied()) {
+						HighVariable hivar = next.getHigh();
+						if(!hivar.getSymbol().isGlobal()) {
+							
+						}
+					}
+					println(next.toString());
+				}
+			//}
+			
+	        
+	        //println("type : " + dattyp.getCategoryPath().getName());
+	        
+	        /*ClangTokenGroup tokengrp = res.getCCodeMarkup();
+	        
+	        if(tokengrp == null) return;
+	        
+	        ClangToken tokeres = null;
+	        
+	        //println("searching for " + datatypstring);
+	        
+	        mainloop:
+	        for(ClangNode  token : tokengrp) {
+	        	if(token instanceof ClangFuncProto) {
+	        		/*for(ClangNode  outter : ((ClangFuncProto)token)) {
+	        			if(outter instanceof ClangVariableDecl)
+	        			for(ClangNode inner2 : ((ClangVariableDecl)outter)) {
+		        			if(inner2 instanceof ClangToken) {
+		        				if(((ClangToken)inner2).getText().equals(datatypstring)) {
+					        		tokeres = (ClangToken)inner2;
+					        		//println(inner2.getClass().toString());
+					        		break mainloop;
+					        	}
 			        			else {
-			        				//println(inner2.getClass().toString());
+			        				//println("" + ((ClangToken)inner2).getText());
 			        			}
 		        			}
-		        	}
-		        }
-		        }
-		        if(tokeres == null) continue;
-		        //println("found");
-		        
-				//ClangToken tokeres = new ClangToken(null, datatypstring);
-				DecompilerLocation loc = new DecompilerLocation(currentProgram, fn.getEntryPoint(), fn.getEntryPoint(), res, tokeres,1,1);
-				println("" + loc);
-				FillOutStructureCmd fillCmd =
-						new FillOutStructureCmd(currentProgram, loc, state.getTool());
-				fillCmd.applyTo(currentProgram, this.monitor);
-			}
+		        			else {
+		        				//println(inner2.getClass().toString());
+		        			}
+	        			}*/
+	        	/*}
+	        	else {
+	        		println(token.getClass().toString());
+	        	}
+	        }
+	        //if(tokeres == null) continue;
+	        //println("found");
+	        
+			//ClangToken tokeres = new ClangToken(null, datatypstring);
+			/*DecompilerLocation loc = new DecompilerLocation(currentProgram, fn.getEntryPoint(), fn.getEntryPoint(), res, tokeres,1,1);
+			println("" + loc);
+			FillOutStructureCmd fillCmd =
+					new FillOutStructureCmd(currentProgram, loc, state.getTool());
+			fillCmd.applyTo(currentProgram, this.monitor);*/
+
+			//break;
 		}
 	}
 	
@@ -188,11 +277,7 @@ public class CreateStructure extends GhidraScript {
 	private NoisyStructureBuilder componentMap = new NoisyStructureBuilder();
 	private HashMap<Address, Address> addressToCallInputMap = new HashMap<>();
 
-	private Program currentProgram;
-	private ProgramLocation currentLocation;
 	private Function rootFunction;
-	private TaskMonitor monitor;
-	private PluginTool tool;
 
 	private List<OffsetPcodeOpPair> storePcodeOps = new ArrayList<>();
 	private List<OffsetPcodeOpPair> loadPcodeOps = new ArrayList<>();
@@ -206,7 +291,7 @@ public class CreateStructure extends GhidraScript {
 	 */
 	public void fillout(Program program, ProgramLocation location, PluginTool tool) {
 		//super("Fill Out Structure", true, false, true);
-		this.tool = tool;
+		//this.tool = tool;
 		this.currentProgram = program;
 		this.currentLocation = Objects.requireNonNull(location);
 	}
@@ -542,6 +627,31 @@ public class CreateStructure extends GhidraScript {
 
 		return decomplib;
 	}
+	
+	private DecompInterface setUpDecompiler(Program program) {
+ 		DecompInterface decompInterface = new DecompInterface();
+
+ 		// call it to get results
+ 		if (!decompInterface.openProgram(currentProgram)) {
+ 			println("Decompile Error: " + decompInterface.getLastMessage());
+ 			return null;
+ 		}
+
+ 		DecompileOptions options;
+ 		options = new DecompileOptions();
+ 		OptionsService service = state.getTool().getService(OptionsService.class);
+ 		if (service != null) {
+ 			ToolOptions opt = service.getOptions("Decompiler");
+ 			options.grabFromToolAndProgram(null, opt, program);
+ 		}
+ 		decompInterface.setOptions(options);
+
+ 		decompInterface.toggleCCode(true);
+ 		decompInterface.toggleSyntaxTree(true);
+ 		decompInterface.setSimplificationStyle("decompile");
+
+ 		return decompInterface;
+ 	}
 
 	public DecompileResults decompileFunction(Function f, DecompInterface decomplib) {
 		DecompileResults decompRes;
