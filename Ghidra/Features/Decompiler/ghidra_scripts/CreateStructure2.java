@@ -223,12 +223,7 @@ public class CreateStructure2 extends GhidraScript {
 			structDT = createStructure(structDT, var, rootFunction, isThisParam);
 			populateStructure(structDT);
 
-			DataType pointerDT = new PointerDataType(structDT);
-
-			// Delay adding to the manager until full structure is accumulated
-			pointerDT = currentProgram.getDataTypeManager()
-					.addDataType(pointerDT, DataTypeConflictHandler.DEFAULT_HANDLER);
-			commitVariable(var, pointerDT, isThisParam);
+			commitVariable(var, structDT, isThisParam);
 		}
 		catch (Exception e) {
 			Msg.showError(this, tool.getToolFrame(), "Auto Create Structure Failed",
@@ -375,13 +370,34 @@ public class CreateStructure2 extends GhidraScript {
 	private void commitVariable(HighVariable var, DataType newDt, boolean isThisParam) {
 		if (!isThisParam) {
 			try {
-				HighFunctionDBUtil.updateDBVariable(var.getSymbol(), null, newDt,
+				DataType pointerDT = null;
+				if (var.getDataType() instanceof Pointer) {
+					Pointer ptr = (Pointer)var.getDataType();
+					if(ptr.getDataType() instanceof TypeDef) {
+						TypeDef tpdf = ((TypeDef) ptr.getDataType());
+						
+						DataTypeManager tpdtdatman = tpdf.getDataTypeManager();
+						
+						newDt = tpdtdatman.addDataType(newDt, DataTypeConflictHandler.DEFAULT_HANDLER);
+						
+						tpdtdatman.replaceDataType(tpdf.getBaseDataType(), newDt, false);
+												
+						pointerDT = new PointerDataType(tpdf, tpdtdatman);
+					}
+				}
+				if(pointerDT == null)
+					pointerDT = new PointerDataType(newDt);
+
+				// Delay adding to the manager until full structure is accumulated
+				//pointerDT = currentProgram.getDataTypeManager()
+				//		.addDataType(pointerDT, DataTypeConflictHandler.DEFAULT_HANDLER);
+				HighFunctionDBUtil.updateDBVariable(var.getSymbol(), null, pointerDT,
 					SourceType.USER_DEFINED);
 			}
 			catch (DuplicateNameException e) {
 				throw new AssertException("Unexpected exception", e);
 			}
-			catch (InvalidInputException e) {
+			catch (InvalidInputException | DataTypeDependencyException e) {
 				Msg.error(this,
 					"Failed to re-type variable " + var.getName() + ": " + e.getMessage());
 			}
@@ -907,7 +923,7 @@ public class CreateStructure2 extends GhidraScript {
 	 * @param dt is the data-type of the variable to test
 	 * @return the extendable structure data-type or null
 	 */
-	public static Structure getStructureForExtending(DataType dt) {
+	public Structure getStructureForExtending(DataType dt) {
 		if (dt instanceof TypeDef) {
 			dt = ((TypeDef) dt).getBaseDataType();
 		}
